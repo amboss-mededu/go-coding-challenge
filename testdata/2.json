@@ -1,0 +1,9 @@
+{
+  "id": "prod-2",
+  "name": "Gadget",
+  "description": null,
+  "price": 25,
+  "quantity": 0,
+  "active": false,
+  "tags": []
+}

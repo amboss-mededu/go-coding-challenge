@@ -1,0 +1,6 @@
+{
+  "id": "cat-3",
+  "name": "Biochemistry",
+  "kind": "other",
+  "parent": "cat-1"
+}
