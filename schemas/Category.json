@@ -1,0 +1,23 @@
+{
+  "title": "Category",
+  "type": "object",
+  "properties": {
+    "id": {
+      "type": "string"
+    },
+    "name": {
+      "type": "string"
+    },
+    "kind": {
+      "type": "string",
+      "enum": [
+        "basic-science",
+        "clinical",
+        "other"
+      ]
+    },
+    "parent": {
+      "type": ["string", "null"]
+    }
+  }
+}

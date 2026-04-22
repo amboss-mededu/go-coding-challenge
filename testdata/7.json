@@ -1,0 +1,42 @@
+{
+  "id": "art-1",
+  "title": "Introduction to Anatomy",
+  "status": "published",
+  "authors": ["author-1", "author-2"],
+  "metadata": {
+    "wordCount": 1500,
+    "readingTime": 7.5
+  },
+  "category": {
+    "id": "cat-1",
+    "name": "Anatomy",
+    "kind": "basic-science",
+    "parent": null
+  },
+  "dimensions": {
+    "width": 800,
+    "height": 600
+  },
+  "content": {
+    "format": "richtext",
+    "html": "<p>The human body...</p>",
+    "nodes": [
+      {
+        "type": "paragraph",
+        "text": "The human body...",
+        "children": []
+      },
+      {
+        "type": "heading",
+        "text": null,
+        "children": [
+          {
+            "type": "text",
+            "text": "Section 1",
+            "children": []
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -1,0 +1,50 @@
+{
+  "title": "Product",
+  "type": "object",
+  "required": ["id", "name", "price"],
+  "properties": {
+    "id": {
+      "type": "string"
+    },
+    "name": {
+      "type": "string"
+    },
+    "description": {
+      "type": ["string", "null"]
+    },
+    "price": {
+      "type": "number"
+    },
+    "quantity": {
+      "type": "integer"
+    },
+    "active": {
+      "type": "boolean"
+    },
+    "tags": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "classification": {
+      "type": "string",
+      "enum": ["basic_science", "applied", "experimental"]
+    },
+    "dimensions": {
+      "type": "object",
+      "properties": {
+        "width": {
+          "type": "number"
+        },
+        "height": {
+          "type": "number"
+        },
+        "unit": {
+          "type": "string",
+          "enum": ["cm", "inch"]
+        }
+      }
+    }
+  }
+}

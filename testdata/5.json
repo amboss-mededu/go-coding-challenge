@@ -1,0 +1,6 @@
+{
+  "id": "cat-2",
+  "name": "Physiology",
+  "kind": "clinical",
+  "parent": "cat-1"
+}

@@ -1,0 +1,10 @@
+{
+  "id": "prod-1",
+  "name": "Widget",
+  "description": "A simple widget",
+  "price": 10,
+  "quantity": 5,
+  "active": true,
+  "tags": ["sale", "new"],
+  "classification": "basic_science"
+}
