@@ -2,6 +2,11 @@
 
 package model
 
+import (
+	"encoding/json"
+	"fmt"
+)
+
 type CategoryKind string
 
 const (
@@ -17,6 +22,105 @@ type Category struct {
 	Parent *string      `json:"parent,omitempty"`
 }
 
-type Product struct{}
+type ProductClassification string
 
-type Article struct{}
+const (
+	ProductClassificationBasicScience ProductClassification = "basic_science"
+	ProductClassificationApplied      ProductClassification = "applied"
+	ProductClassificationExperimental ProductClassification = "experimental"
+)
+
+type ProductDimensionsUnit string
+
+const (
+	ProductDimensionsUnitCm   ProductDimensionsUnit = "cm"
+	ProductDimensionsUnitInch ProductDimensionsUnit = "inch"
+)
+
+type ProductDimensions struct {
+	Height float64               `json:"height,omitempty"`
+	Unit   ProductDimensionsUnit `json:"unit,omitempty"`
+	Width  float64               `json:"width,omitempty"`
+}
+
+type Product struct {
+	Active         bool                  `json:"active,omitempty"`
+	Classification ProductClassification `json:"classification,omitempty"`
+	Description    *string               `json:"description,omitempty"`
+	Dimensions     *ProductDimensions    `json:"dimensions,omitempty"`
+	ID             string                `json:"id"`
+	Name           string                `json:"name"`
+	Price          float64               `json:"price"`
+	Quantity       int                   `json:"quantity,omitempty"`
+	Tags           []string              `json:"tags,omitempty"`
+}
+
+type PlainText struct {
+	Format string `json:"format,omitempty"`
+	Text   string `json:"text,omitempty"`
+}
+
+type RichText struct {
+	Format string         `json:"format,omitempty"`
+	HTML   string         `json:"html,omitempty"`
+	Nodes  []RichTextNode `json:"nodes,omitempty"`
+}
+
+type RichTextNode struct {
+	Children []RichTextNode `json:"children,omitempty"`
+	Text     *string        `json:"text,omitempty"`
+	Type     string         `json:"type,omitempty"`
+}
+
+type ArticleContent struct {
+	RichText  *RichText
+	PlainText *PlainText
+}
+
+func (u *ArticleContent) UnmarshalJSON(data []byte) error {
+	var probe struct {
+		Format string `json:"format"`
+	}
+	if err := json.Unmarshal(data, &probe); err != nil {
+		return err
+	}
+	switch probe.Format {
+	case "richtext":
+		u.RichText = new(RichText)
+		return json.Unmarshal(data, u.RichText)
+	case "plaintext":
+		u.PlainText = new(PlainText)
+		return json.Unmarshal(data, u.PlainText)
+	default:
+		return fmt.Errorf("unknown format: %q", probe.Format)
+	}
+}
+
+type ArticleDimensions struct {
+	Height int `json:"height,omitempty"`
+	Width  int `json:"width,omitempty"`
+}
+
+type ArticleMetadata struct {
+	ReadingTime float64 `json:"readingTime,omitempty"`
+	WordCount   int     `json:"wordCount,omitempty"`
+}
+
+type ArticleStatus string
+
+const (
+	ArticleStatusDraft     ArticleStatus = "draft"
+	ArticleStatusPublished ArticleStatus = "published"
+	ArticleStatusArchived  ArticleStatus = "archived"
+)
+
+type Article struct {
+	Authors    []string           `json:"authors,omitempty"`
+	Category   *Category          `json:"category,omitempty"`
+	Content    *ArticleContent    `json:"content,omitempty"`
+	Dimensions *ArticleDimensions `json:"dimensions,omitempty"`
+	ID         string             `json:"id"`
+	Metadata   *ArticleMetadata   `json:"metadata,omitempty"`
+	Status     ArticleStatus      `json:"status,omitempty"`
+	Title      string             `json:"title"`
+}
