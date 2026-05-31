@@ -235,8 +235,19 @@ func generateOneOf(typeName string, oneOf []*Schema, defs map[string]*Schema) st
 
 	fmt.Fprintf(&b, "type %s struct {\n", typeName)
 	for _, v := range variants {
-		fmt.Fprintf(&b, "\t%s *%s\n", v.fieldName, v.typeName)
+		// json:"-" because marshal/unmarshal are handled entirely by the custom methods below.
+		fmt.Fprintf(&b, "\t%s *%s `json:\"-\"`\n", v.fieldName, v.typeName)
 	}
+	b.WriteString("}\n\n")
+
+	// MarshalJSON delegates to whichever variant is set.
+	fmt.Fprintf(&b, "func (u *%s) MarshalJSON() ([]byte, error) {\n", typeName)
+	for _, v := range variants {
+		fmt.Fprintf(&b, "\tif u.%s != nil {\n", v.fieldName)
+		fmt.Fprintf(&b, "\t\treturn json.Marshal(u.%s)\n", v.fieldName)
+		b.WriteString("\t}\n")
+	}
+	b.WriteString("\treturn []byte(\"null\"), nil\n")
 	b.WriteString("}\n\n")
 
 	fmt.Fprintf(&b, "func (u *%s) UnmarshalJSON(data []byte) error {\n", typeName)
@@ -296,10 +307,12 @@ func generateObject(typeName string, s *Schema, defs map[string]*Schema) string 
 	fmt.Fprintf(&b, "type %s struct {\n", typeName)
 	for _, propName := range sortedKeys(s.Properties) {
 		prop := s.Properties[propName]
+		// Treat const fields as required: the value is always fixed, never absent.
+		isRequired := required[propName] || prop.Const != nil
 		fmt.Fprintf(&b, "\t%s %s %s\n",
 			goName(propName),
 			goFieldType(propName, prop, typeName),
-			jsonTag(propName, required[propName]),
+			jsonTag(propName, isRequired),
 		)
 	}
 	b.WriteString("}\n\n")
@@ -307,22 +320,43 @@ func generateObject(typeName string, s *Schema, defs map[string]*Schema) string 
 	return b.String()
 }
 
+// hasOneOf reports whether any property in s uses oneOf.
+func hasOneOf(s *Schema) bool {
+	for _, prop := range s.Properties {
+		if len(prop.OneOf) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
 // buildModel assembles the full model/model.go source and formats it with gofmt.
 func buildModel(schemas map[string]*Schema) ([]byte, error) {
 	var types strings.Builder
 	needsJSON := false
 
-	for _, name := range []string{"Category", "Product"} {
-		if s, ok := schemas[name]; ok {
-			types.WriteString(generateObject(name, s, nil))
+	// Process every non-Article schema sorted by title so output is stable
+	// and new schemas are picked up automatically.
+	var names []string
+	for name := range schemas {
+		if name != "Article" {
+			names = append(names, name)
 		}
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		types.WriteString(generateObject(name, schemas[name], nil))
 	}
 
 	if art, ok := schemas["Article"]; ok {
-		for _, prop := range art.Properties {
-			if len(prop.OneOf) > 0 {
-				needsJSON = true
-				break
+		// Check properties and all defs for oneOf — either location requires the json import.
+		needsJSON = hasOneOf(art)
+		if !needsJSON {
+			for _, def := range art.Defs {
+				if hasOneOf(def) {
+					needsJSON = true
+					break
+				}
 			}
 		}
 		// $defs types must appear before Article references them.

@@ -54,8 +54,8 @@ func loadSchema(path string) (*Schema, error) {
 
 func main() {
 	schemaDir := "schemas"
-	files, err := filepath.Glob(filepath.Join(schemaDir, "*.json"))
-	if err != nil || len(files) == 0 {
+	files, _ := filepath.Glob(filepath.Join(schemaDir, "*.json"))
+	if len(files) == 0 {
 		fmt.Fprintln(os.Stderr, "no schema files found in", schemaDir)
 		os.Exit(1)
 	}

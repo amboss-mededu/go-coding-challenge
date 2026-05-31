@@ -56,12 +56,12 @@ type Product struct {
 }
 
 type PlainText struct {
-	Format string `json:"format,omitempty"`
+	Format string `json:"format"`
 	Text   string `json:"text,omitempty"`
 }
 
 type RichText struct {
-	Format string         `json:"format,omitempty"`
+	Format string         `json:"format"`
 	HTML   string         `json:"html,omitempty"`
 	Nodes  []RichTextNode `json:"nodes,omitempty"`
 }
@@ -73,8 +73,18 @@ type RichTextNode struct {
 }
 
 type ArticleContent struct {
-	RichText  *RichText
-	PlainText *PlainText
+	RichText  *RichText  `json:"-"`
+	PlainText *PlainText `json:"-"`
+}
+
+func (u *ArticleContent) MarshalJSON() ([]byte, error) {
+	if u.RichText != nil {
+		return json.Marshal(u.RichText)
+	}
+	if u.PlainText != nil {
+		return json.Marshal(u.PlainText)
+	}
+	return []byte("null"), nil
 }
 
 func (u *ArticleContent) UnmarshalJSON(data []byte) error {
