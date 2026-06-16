@@ -1,3 +1,3 @@
 module github.com/amboss-mededu/go-coding-challenge
 
-go 1.23
+go 1.26
