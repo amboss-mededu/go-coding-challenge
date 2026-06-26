@@ -1,7 +1,7 @@
 package model
 
-type Product struct{}
+type Productt struct{}
 
-type Category struct{}
+type Categoryy struct{}
 
-type Article struct{}
+type Articlee struct{}
