@@ -11,6 +11,10 @@ import (
 	"strings"
 )
 
+const (
+	ARRAY_TYPE = "array"
+)
+
 // Schema represents a JSON Schema node.
 type Schema struct {
 	Title      string             `json:"title"`      // Title is required for named types.
@@ -74,44 +78,55 @@ func NewGenerator(dir string) (*Generator, error) {
 func (g *Generator) Generate() (map[string][]byte, error) {
 	schemasMap := make(map[string][]byte, len(g.schemas))
 
-	for _, s := range g.schemas {
+	for _, mainSchema := range g.schemas {
 		var buf bytes.Buffer
 
-		requiredFields := make(map[string]bool, len(s.Required))
-		for _, r := range s.Required {
+		requiredFields := make(map[string]bool, len(mainSchema.Required))
+		for _, r := range mainSchema.Required {
 			requiredFields[r] = true
 		}
 
 		// TODO, i think i can avoid this loop and sorting by adding maybe a flag to the schema
 		// that tells me if the property was already processed that way i can have idempotency
-		propertyNames := make([]string, 0, len(s.Properties))
-		for propertyName := range s.Properties {
+		propertyNames := make([]string, 0, len(mainSchema.Properties))
+		for propertyName := range mainSchema.Properties {
 			propertyNames = append(propertyNames, propertyName)
 		}
 		sort.Strings(propertyNames)
 
 		var fields bytes.Buffer
-		for _, property := range propertyNames {
-			goType := setGoType(s.Properties[property])
+		var decls bytes.Buffer
+		for _, propertyName := range propertyNames {
+			property := mainSchema.Properties[propertyName]
+
+			var goType string
+			if len(property.Enum) > 0 {
+				goType = setEnumType(&decls, mainSchema.Title, propertyName, property.Enum)
+			} else {
+				goType = setGoType(property)
+			}
 			if goType == "" {
 				continue
 			}
 
-			tag := property
-			if !requiredFields[property] {
+			tag := propertyName
+			if !requiredFields[propertyName] {
 				tag += ",omitempty"
 			}
-			fmt.Fprintf(&fields, "\t%s %s `json:\"%s\"`\n", toPascalCase(property), goType, tag)
+			fmt.Fprintf(&fields, "\t%s %s `json:\"%s\"`\n", toPascalCase(propertyName), goType, tag)
 		}
 
 		if fields.Len() > 0 {
-			fmt.Fprintf(&buf, "package model\n\ntype %s struct {\n%s}\n", s.Title, fields.String())
+			fmt.Fprintf(&buf, "package model\n\ntype %s struct {\n%s}\n", mainSchema.Title, fields.String())
+			if decls.Len() > 0 {
+				fmt.Fprintf(&buf, "\n%s", decls.String())
+			}
 			src, err := format.Source(buf.Bytes())
 			if err != nil {
-				return nil, fmt.Errorf("formatting source for %q: %w", s.Title, err)
+				return nil, fmt.Errorf("formatting source for %q: %w", mainSchema.Title, err)
 			}
 
-			filename := strings.ToLower(s.Title) + ".go"
+			filename := strings.ToLower(mainSchema.Title) + ".go"
 			schemasMap[filename] = src
 		}
 	}
@@ -126,8 +141,50 @@ func setGoType(s *Schema) string {
 	if s.Type == nil {
 		return ""
 	}
-
+	var single string
+	if err := json.Unmarshal(s.Type, &single); err == nil && single == ARRAY_TYPE {
+		return setArrayType(s)
+	}
 	return setPrimitiveType(s)
+}
+
+// setArrayType returns "[]T" for array schemas whose items resolve to a known type.
+// Returns "" for unresolvable items (object, $ref, missing, etc.).
+func setArrayType(s *Schema) string {
+	if s.Items == nil {
+		return ""
+	}
+	elem := setGoType(s.Items)
+	if elem == "" {
+		return ""
+	}
+	return "[]" + elem
+}
+
+// setEnumType emits a named string type and a const block for a string enum into decls,
+// and returns the generated type name to use as the field's Go type. Non-string enum
+// values are skipped; identifier collisions (after PascalCasing) are disambiguated with a
+// numeric suffix so every value gets its own constant.
+func setEnumType(decls *bytes.Buffer, schemaName, property string, values []json.RawMessage) string {
+	typeName := schemaName + toPascalCase(property)
+	var consts bytes.Buffer
+	seen := make(map[string]bool)
+	for _, raw := range values {
+		var v string
+		if err := json.Unmarshal(raw, &v); err != nil {
+			continue // non-string enum value — out of scope for step 05
+		}
+		name := typeName + toPascalCase(v)
+		base := name
+		for i := 2; seen[name]; i++ {
+			name = fmt.Sprintf("%s%d", base, i)
+		}
+		seen[name] = true
+		fmt.Fprintf(&consts, "\t%s %s = %q\n", name, typeName, v)
+	}
+
+	fmt.Fprintf(decls, "type %s string\n\nconst (\n%s)\n", typeName, consts.String())
+	return typeName
 }
 
 // setPrimitiveType returns the Go type string for a schema node, or "" if the type cannot
