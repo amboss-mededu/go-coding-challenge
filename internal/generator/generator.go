@@ -7,6 +7,7 @@ import (
 	"go/format"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 )
 
@@ -28,6 +29,13 @@ type Schema struct {
 type Generator struct {
 	dir     string
 	schemas []*Schema // schemas list of schemas read from the directory
+}
+
+var primitiveTypes = map[string]string{
+	"string":  "string",
+	"number":  "float64",
+	"integer": "int",
+	"boolean": "bool",
 }
 
 // NewGenerator reads all JSON Schema files in dir and returns a Generator.
@@ -64,20 +72,83 @@ func NewGenerator(dir string) (*Generator, error) {
 
 // Generate returns a map of filename → gofmt-formatted Go source, one entry per schema.
 func (g *Generator) Generate() (map[string][]byte, error) {
-	result := make(map[string][]byte, len(g.schemas))
+	schemasMap := make(map[string][]byte, len(g.schemas))
 
 	for _, s := range g.schemas {
 		var buf bytes.Buffer
-		fmt.Fprintf(&buf, "package model\n\ntype %s struct{}\n", s.Title)
 
-		src, err := format.Source(buf.Bytes())
-		if err != nil {
-			return nil, fmt.Errorf("formatting source for %q: %w", s.Title, err)
+		requiredFields := make(map[string]bool, len(s.Required))
+		for _, r := range s.Required {
+			requiredFields[r] = true
 		}
 
-		filename := strings.ToLower(s.Title) + ".go"
-		result[filename] = src
+		// TODO, i think i can avoid this loop and sorting by adding maybe a flag to the schema
+		// that tells me if the property was already processed that way i can have idempotency
+		propertyNames := make([]string, 0, len(s.Properties))
+		for propertyName := range s.Properties {
+			propertyNames = append(propertyNames, propertyName)
+		}
+		sort.Strings(propertyNames)
+
+		var fields bytes.Buffer
+		for _, property := range propertyNames {
+			goType := setGoType(s.Properties[property])
+			if goType == "" {
+				continue
+			}
+
+			tag := property
+			if !requiredFields[property] {
+				tag += ",omitempty"
+			}
+			fmt.Fprintf(&fields, "\t%s %s `json:\"%s\"`\n", toPascalCase(property), goType, tag)
+		}
+
+		if fields.Len() > 0 {
+			fmt.Fprintf(&buf, "package model\n\ntype %s struct {\n%s}\n", s.Title, fields.String())
+			src, err := format.Source(buf.Bytes())
+			if err != nil {
+				return nil, fmt.Errorf("formatting source for %q: %w", s.Title, err)
+			}
+
+			filename := strings.ToLower(s.Title) + ".go"
+			schemasMap[filename] = src
+		}
 	}
 
-	return result, nil
+	return schemasMap, nil
+}
+
+// setGoType returns the Go type string for a schema node, or "" if the type cannot
+// be mapped to a primitive (array, object, multi-type beyond nullable, etc.).
+// Handles both single-string types ("string") and nullable pairs (["string","null"]).
+func setGoType(s *Schema) string {
+	if s.Type == nil {
+		return ""
+	}
+
+	return setPrimitiveType(s)
+}
+
+// setPrimitiveType returns the Go type string for a schema node, or "" if the type cannot
+// be mapped to a primitive (array, object, multi-type beyond nullable, etc.).
+// Handles both single-string types ("string") and nullable pairs (["string","null"]).
+func setPrimitiveType(s *Schema) string {
+	// Case 1: "type": "string" — single primitive
+	var single string
+	if err := json.Unmarshal(s.Type, &single); err == nil {
+		return primitiveTypes[single]
+	}
+	// Case 2: "type": ["string", "null"] — nullable primitive (order-independent)
+	var multi []string
+	if err := json.Unmarshal(s.Type, &multi); err == nil && len(multi) == 2 {
+		for _, t := range multi {
+			if t != "null" {
+				if gt := primitiveTypes[t]; gt != "" {
+					return "*" + gt
+				}
+			}
+		}
+	}
+	return ""
 }

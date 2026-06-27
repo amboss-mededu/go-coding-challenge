@@ -3,3 +3,6 @@ run:
 
 build:
 	go build -o bin/generator ./cmd
+
+test:
+	go clean -testcache && go test ./...
