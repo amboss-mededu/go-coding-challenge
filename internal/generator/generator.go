@@ -80,58 +80,116 @@ func (g *Generator) Generate() (map[string][]byte, error) {
 
 	for _, mainSchema := range g.schemas {
 		var buf bytes.Buffer
-
-		requiredFields := make(map[string]bool, len(mainSchema.Required))
-		for _, r := range mainSchema.Required {
-			requiredFields[r] = true
-		}
-
-		// TODO, i think i can avoid this loop and sorting by adding maybe a flag to the schema
-		// that tells me if the property was already processed that way i can have idempotency
-		propertyNames := make([]string, 0, len(mainSchema.Properties))
-		for propertyName := range mainSchema.Properties {
-			propertyNames = append(propertyNames, propertyName)
-		}
-		sort.Strings(propertyNames)
-
-		var fields bytes.Buffer
 		var decls bytes.Buffer
-		for _, propertyName := range propertyNames {
-			property := mainSchema.Properties[propertyName]
 
-			var goType string
-			if len(property.Enum) > 0 {
-				goType = setEnumType(&decls, mainSchema.Title, propertyName, property.Enum)
-			} else {
-				goType = setGoType(property)
-			}
-			if goType == "" {
-				continue
-			}
-
-			tag := propertyName
-			if !requiredFields[propertyName] {
-				tag += ",omitempty"
-			}
-			fmt.Fprintf(&fields, "\t%s %s `json:\"%s\"`\n", toPascalCase(propertyName), goType, tag)
+		body := generateFields(&decls, mainSchema.Title, mainSchema)
+		if body == "" {
+			continue
 		}
 
-		if fields.Len() > 0 {
-			fmt.Fprintf(&buf, "package model\n\ntype %s struct {\n%s}\n", mainSchema.Title, fields.String())
-			if decls.Len() > 0 {
-				fmt.Fprintf(&buf, "\n%s", decls.String())
-			}
-			src, err := format.Source(buf.Bytes())
-			if err != nil {
-				return nil, fmt.Errorf("formatting source for %q: %w", mainSchema.Title, err)
-			}
-
-			filename := strings.ToLower(mainSchema.Title) + ".go"
-			schemasMap[filename] = src
+		fmt.Fprintf(&buf, "package model\n\ntype %s struct {\n%s}\n", mainSchema.Title, body)
+		if decls.Len() > 0 {
+			fmt.Fprintf(&buf, "\n%s", decls.String())
 		}
+
+		src, err := format.Source(buf.Bytes())
+		if err != nil {
+			return nil, fmt.Errorf("formatting source for %q: %w", mainSchema.Title, err)
+		}
+
+		filename := strings.ToLower(mainSchema.Title) + ".go"
+		schemasMap[filename] = src
 	}
 
 	return schemasMap, nil
+}
+
+// objectType reports whether s is an inline object and whether it is nullable
+// (type ["object","null"]). Single "object" → (true,false); ["object","null"] →
+// (true,true); anything else → (false,false). $ref and oneOf nodes carry no "type"
+// and so are never treated as inline objects (handled in later steps).
+func objectType(s *Schema) (isObject, nullable bool) {
+	var single string
+	if err := json.Unmarshal(s.Type, &single); err == nil {
+		return single == "object", false
+	}
+	var multi []string
+	if err := json.Unmarshal(s.Type, &multi); err == nil && len(multi) == 2 {
+		var hasObject, hasNull bool
+		for _, t := range multi {
+			switch t {
+			case "object":
+				hasObject = true
+			case "null":
+				hasNull = true
+			}
+		}
+		// it looks redundant to return the same value twice, but the first return is for isObject and the second is for nullable
+		// but we are evaluating this scenario: ["object", "null"] which means it is an object and it is nullable.
+		return hasObject && hasNull, hasObject && hasNull
+	}
+	return false, false
+}
+
+// generateFields builds the struct body for a struct named typeName from s.Properties,
+// emitting any nested enum/object type declarations into decls. Properties are sorted
+// for deterministic output.
+func generateFields(decls *bytes.Buffer, typeName string, s *Schema) string {
+	requiredFields := make(map[string]bool, len(s.Required))
+	for _, r := range s.Required {
+		requiredFields[r] = true
+	}
+
+	propertiesNames := make([]string, 0, len(s.Properties))
+	for name := range s.Properties {
+		propertiesNames = append(propertiesNames, name)
+	}
+	sort.Strings(propertiesNames)
+
+	var fields bytes.Buffer
+	for _, name := range propertiesNames {
+		property := s.Properties[name]
+
+		var goType string
+		switch {
+		case len(property.Enum) > 0:
+			goType = setEnumType(decls, typeName, name, property.Enum)
+		case property.Ref != "":
+			goType = resolveRef(property.Ref)
+		default:
+			if isObj, nullable := objectType(property); isObj {
+				goType = setObjectType(decls, typeName+toPascalCase(name), property)
+				if nullable && goType != "" {
+					goType = "*" + goType
+				}
+			} else {
+				goType = setGoType(property)
+			}
+		}
+		if goType == "" {
+			continue
+		}
+
+		tag := name
+		if !requiredFields[name] {
+			tag += ",omitempty"
+		}
+		fmt.Fprintf(&fields, "\t%s %s `json:\"%s\"`\n", toPascalCase(name), goType, tag)
+	}
+	return fields.String()
+}
+
+// setObjectType emits a named struct declaration for an inline object into decls and
+// returns the type name. Nested enums/objects are emitted (recursively) before the
+// struct itself. An object with no resolvable fields emits nothing and returns "" so the
+// caller skips the field.
+func setObjectType(decls *bytes.Buffer, typeName string, s *Schema) string {
+	body := generateFields(decls, typeName, s)
+	if body == "" {
+		return ""
+	}
+	fmt.Fprintf(decls, "type %s struct {\n%s}\n\n", typeName, body)
+	return typeName
 }
 
 // setGoType returns the Go type string for a schema node, or "" if the type cannot
@@ -185,6 +243,17 @@ func setEnumType(decls *bytes.Buffer, schemaName, property string, values []json
 
 	fmt.Fprintf(decls, "type %s string\n\nconst (\n%s)\n", typeName, consts.String())
 	return typeName
+}
+
+// resolveRef maps a cross-schema $ref like "Category.json" to its Go type name by stripping
+// the path and ".json" suffix. Local refs ("#/...") are out of scope (steps 08+) and return "".
+// There is no existence check: if the referenced schema is never generated, the emitted
+// reference won't compile and must be fixed manually.
+func resolveRef(ref string) string {
+	if ref == "" || strings.HasPrefix(ref, "#") {
+		return ""
+	}
+	return strings.TrimSuffix(filepath.Base(ref), ".json")
 }
 
 // setPrimitiveType returns the Go type string for a schema node, or "" if the type cannot

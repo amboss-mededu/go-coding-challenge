@@ -6,3 +6,6 @@ build:
 
 test:
 	go clean -testcache && go test ./...
+
+generate:
+	./bin/generator
