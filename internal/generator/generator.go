@@ -74,25 +74,15 @@ func NewGenerator(dir string) (*Generator, error) {
 	return g, nil
 }
 
-// hasOneOf reports whether any top-level property of s uses oneOf.
-func hasOneOf(s *Schema) bool {
-	for _, p := range s.Properties {
-		if len(p.OneOf) > 0 {
-			return true
-		}
-	}
-	return false
-}
-
 // Generate returns a map of filename → gofmt-formatted Go source, one entry per schema.
 func (g *Generator) Generate() (map[string][]byte, error) {
 	schemasMap := make(map[string][]byte, len(g.schemas))
 
 	for _, mainSchema := range g.schemas {
 		var buf bytes.Buffer
-		var references bytes.Buffer
+		var refBuf bytes.Buffer
 
-		body := generateFields(&references, mainSchema, mainSchema.Title, mainSchema)
+		body := generateFields(&refBuf, mainSchema, mainSchema.Title, mainSchema)
 		if body == "" {
 			continue
 		}
@@ -103,16 +93,17 @@ func (g *Generator) Generate() (map[string][]byte, error) {
 		}
 		sort.Strings(defNames)
 		for _, name := range defNames {
-			setObjectType(&references, mainSchema, mainSchema.Title+toPascalCase(name), mainSchema.Defs[name])
+			setObjectType(&refBuf, mainSchema, mainSchema.Title+toPascalCase(name), mainSchema.Defs[name])
 		}
 
-		header := "package model\n\n"
+		fileHeader := "package model\n\n"
 		if hasOneOf(mainSchema) {
-			header += "import (\n\t\"encoding/json\"\n\t\"fmt\"\n)\n\n"
+			fileHeader += "import (\n\t\"encoding/json\"\n\t\"fmt\"\n)\n\n"
 		}
-		fmt.Fprintf(&buf, "%stype %s struct {\n%s}\n", header, mainSchema.Title, body)
-		if references.Len() > 0 {
-			fmt.Fprintf(&buf, "\n%s", references.String())
+
+		fmt.Fprintf(&buf, "%stype %s struct {\n%s}\n", fileHeader, mainSchema.Title, body)
+		if refBuf.Len() > 0 {
+			fmt.Fprintf(&buf, "\n%s", refBuf.String())
 		}
 
 		src, err := format.Source(buf.Bytes())
@@ -125,33 +116,6 @@ func (g *Generator) Generate() (map[string][]byte, error) {
 	}
 
 	return schemasMap, nil
-}
-
-// objectType reports whether s is an inline object and whether it is nullable
-// (type ["object","null"]). Single "object" → (true,false); ["object","null"] →
-// (true,true); anything else → (false,false). $ref and oneOf nodes carry no "type"
-// and so are never treated as inline objects (handled in later steps).
-func objectType(s *Schema) (isObject, nullable bool) {
-	var single string
-	if err := json.Unmarshal(s.Type, &single); err == nil {
-		return single == "object", false
-	}
-	var multi []string
-	if err := json.Unmarshal(s.Type, &multi); err == nil && len(multi) == 2 {
-		var hasObject, hasNull bool
-		for _, t := range multi {
-			switch t {
-			case "object":
-				hasObject = true
-			case "null":
-				hasNull = true
-			}
-		}
-		// it looks redundant to return the same value twice, but the first return is for isObject and the second is for nullable
-		// but we are evaluating this scenario: ["object", "null"] which means it is an object and it is nullable.
-		return hasObject && hasNull, hasObject && hasNull
-	}
-	return false, false
 }
 
 // generateFields builds the struct body for a struct named typeName from s.Properties,
@@ -173,28 +137,28 @@ func generateFields(refBuffer *bytes.Buffer, root *Schema, typeName string, s *S
 	for _, name := range propertiesNames {
 		property := s.Properties[name]
 
-		var goType string
+		var goTypeName string
 		switch {
 		case len(property.Enum) > 0:
-			goType = setEnumType(refBuffer, typeName, name, property.Enum)
+			goTypeName = setEnumType(refBuffer, typeName, name, property.Enum)
 		case len(property.OneOf) > 0:
-			goType = setUnionType(refBuffer, root, typeName+toPascalCase(name), property.OneOf)
-			if goType != "" {
-				goType = "*" + goType
+			goTypeName = setUnionType(refBuffer, root, typeName+toPascalCase(name), property.OneOf)
+			if goTypeName != "" {
+				goTypeName = "*" + goTypeName
 			}
 		case property.Ref != "":
-			goType, _ = resolveReferences(root.Title, property.Ref)
+			goTypeName = resolveReferences(root.Title, property.Ref)
 		default:
 			if isObj, nullable := objectType(property); isObj {
-				goType = setObjectType(refBuffer, root, typeName+toPascalCase(name), property)
-				if nullable && goType != "" {
-					goType = "*" + goType
+				goTypeName = setObjectType(refBuffer, root, typeName+toPascalCase(name), property)
+				if nullable && goTypeName != "" {
+					goTypeName = "*" + goTypeName
 				}
 			} else {
-				goType = setGoType(root.Title, property)
+				goTypeName = setGoType(root.Title, property)
 			}
 		}
-		if goType == "" {
+		if goTypeName == "" {
 			continue
 		}
 
@@ -202,7 +166,7 @@ func generateFields(refBuffer *bytes.Buffer, root *Schema, typeName string, s *S
 		if !requiredFields[name] {
 			tag += ",omitempty"
 		}
-		fmt.Fprintf(&fields, "\t%s %s `json:\"%s\"`\n", toPascalCase(name), goType, tag)
+		fmt.Fprintf(&fields, "\t%s %s `json:\"%s\"`\n", toPascalCase(name), goTypeName, tag)
 	}
 	return fields.String()
 }
@@ -220,52 +184,42 @@ func setObjectType(decls *bytes.Buffer, root *Schema, typeName string, s *Schema
 	return typeName
 }
 
-// discriminator returns the JSON key and string value of the first (sorted) property
-// carrying a non-empty string const — the field that selects a oneOf variant.
-func discriminator(s *Schema) (key, value string) {
-	names := make([]string, 0, len(s.Properties))
-	for n := range s.Properties {
-		names = append(names, n)
-	}
-	sort.Strings(names)
-	for _, n := range names {
-		p := s.Properties[n]
-		if len(p.Const) == 0 {
-			continue
-		}
-		var v string
-		if err := json.Unmarshal(p.Const, &v); err == nil {
-			return n, v
-		}
-	}
-	return "", ""
-}
-
 // setUnionType emits a struct with one pointer field per variant and an UnmarshalJSON
 // for a oneOf union into decls. Returns the struct type name, or "" if no variant resolves.
 func setUnionType(decls *bytes.Buffer, root *Schema, typeName string, members []*Schema) string {
-	type variant struct{ goType, fieldName, disc string }
+	type variant struct{ goTypeName, fieldName, disc string }
 	var variants []variant
 	discKey := ""
 	for _, m := range members {
-		if m.Ref == "" {
-			continue
+		if m.Ref != "" {
+			goTypeName := resolveReferences(root.Title, m.Ref)
+			defKey := refDefKey(m.Ref)
+			def := root.Defs[defKey]
+			if def == nil {
+				continue
+			}
+			names := make([]string, 0, len(def.Properties))
+			for n := range def.Properties {
+				names = append(names, n)
+			}
+			sort.Strings(names)
+			k, v := "", ""
+			for _, n := range names {
+				if cv, ok := constValue(def.Properties[n]); ok {
+					k, v = n, cv
+					break
+				}
+			}
+			if k == "" {
+				continue
+			}
+			discKey = k
+			variants = append(variants, variant{
+				goTypeName: goTypeName,
+				fieldName:  toPascalCase(defKey),
+				disc:       v,
+			})
 		}
-		goType, defKey := resolveReferences(root.Title, m.Ref)
-		def := root.Defs[defKey]
-		if def == nil {
-			continue
-		}
-		k, v := discriminator(def)
-		if k == "" {
-			continue
-		}
-		discKey = k
-		variants = append(variants, variant{
-			goType:    goType,
-			fieldName: toPascalCase(defKey),
-			disc:      v,
-		})
 	}
 	if len(variants) == 0 {
 		return ""
@@ -273,7 +227,7 @@ func setUnionType(decls *bytes.Buffer, root *Schema, typeName string, members []
 
 	fmt.Fprintf(decls, "type %s struct {\n", typeName)
 	for _, v := range variants {
-		fmt.Fprintf(decls, "\t%s *%s\n", v.fieldName, v.goType)
+		fmt.Fprintf(decls, "\t%s *%s\n", v.fieldName, v.goTypeName)
 	}
 	fmt.Fprintf(decls, "}\n\n")
 
@@ -285,7 +239,7 @@ func setUnionType(decls *bytes.Buffer, root *Schema, typeName string, members []
 	fmt.Fprintf(decls, "\tswitch disc.%s {\n", field)
 	for _, v := range variants {
 		fmt.Fprintf(decls, "\tcase %q:\n\t\tc.%s = &%s{}\n\t\treturn json.Unmarshal(data, c.%s)\n",
-			v.disc, v.fieldName, v.goType, v.fieldName)
+			v.disc, v.fieldName, v.goTypeName, v.fieldName)
 	}
 	fmt.Fprintf(decls, "\tdefault:\n\t\treturn fmt.Errorf(\"unknown %s %%q\", disc.%s)\n\t}\n}\n\n", discKey, field)
 	return typeName
@@ -296,14 +250,13 @@ func setUnionType(decls *bytes.Buffer, root *Schema, typeName string, members []
 // Handles both single-string types ("string") and nullable pairs (["string","null"]).
 func setGoType(root string, s *Schema) string {
 	if s.Ref != "" {
-		gt, _ := resolveReferences(root, s.Ref)
-		return gt
+		return resolveReferences(root, s.Ref)
 	}
 	if s.Type == nil {
 		return ""
 	}
-	var single string
-	if err := json.Unmarshal(s.Type, &single); err == nil && single == ARRAY_TYPE {
+	var typeName string
+	if err := json.Unmarshal(s.Type, &typeName); err == nil && typeName == ARRAY_TYPE {
 		return setArrayType(root, s)
 	}
 	return setPrimitiveType(s)
@@ -315,11 +268,11 @@ func setArrayType(root string, s *Schema) string {
 	if s.Items == nil {
 		return ""
 	}
-	elem := setGoType(root, s.Items)
-	if elem == "" {
+	goTypeName := setGoType(root, s.Items)
+	if goTypeName == "" {
 		return ""
 	}
-	return "[]" + elem
+	return "[]" + goTypeName
 }
 
 // setEnumType emits a named string type and a const block for a string enum into decls,
@@ -348,20 +301,19 @@ func setEnumType(decls *bytes.Buffer, schemaName, property string, values []json
 	return typeName
 }
 
-// resolveReferences maps a $ref to its Go type name and the bare ref name. A local ref
-// ("#/$defs/RichTextNode") PascalCases the segment after the last "/" and prefixes the root schema
-// title → ("ArticleRichTextNode", "RichTextNode"). A cross-schema ref ("Category.json") strips the
-// path and ".json" suffix → ("Category", "Category"). The bare name is the raw def key, so callers
-// can index root.Defs with it; PascalCasing is left to callers. Empty → ("", "").
-func resolveReferences(root, ref string) (goType, name string) {
-	if ref == "" {
-		return "", ""
+// resolveReferences maps a $ref to its Go type name. A local ref ("#/$defs/RichTextNode")
+// PascalCases the segment after the last "/" and prefixes the root schema title →
+// "ArticleRichTextNode". A cross-schema ref ("Category.json") strips the path and ".json"
+// suffix → "Category". Empty → "".
+func resolveReferences(root, ref string) string {
+	name := refDefKey(ref)
+	if name == "" {
+		return ""
 	}
-	name = strings.TrimSuffix(filepath.Base(ref), ".json")
 	if strings.HasPrefix(ref, "#") {
-		return root + toPascalCase(name), name
+		return root + toPascalCase(name)
 	}
-	return name, name
+	return name
 }
 
 // setPrimitiveType returns the Go type string for a schema node, or "" if the type cannot

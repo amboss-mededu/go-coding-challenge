@@ -25,13 +25,13 @@ func (c *ArticleContent) UnmarshalJSON(data []byte) error {
 	if string(data) == "null" {
 		return nil
 	}
-	var disc struct {
+	var discriminator struct {
 		Format string `json:"format"`
 	}
-	if err := json.Unmarshal(data, &disc); err != nil {
+	if err := json.Unmarshal(data, &discriminator); err != nil {
 		return err
 	}
-	switch disc.Format {
+	switch discriminator.Format {
 	case "richtext":
 		c.RichText = &ArticleRichText{}
 		return json.Unmarshal(data, c.RichText)
@@ -39,7 +39,7 @@ func (c *ArticleContent) UnmarshalJSON(data []byte) error {
 		c.PlainText = &ArticlePlainText{}
 		return json.Unmarshal(data, c.PlainText)
 	default:
-		return fmt.Errorf("unknown format %q", disc.Format)
+		return fmt.Errorf("unknown format %q", discriminator.Format)
 	}
 }
 
