@@ -74,22 +74,45 @@ func NewGenerator(dir string) (*Generator, error) {
 	return g, nil
 }
 
+// hasOneOf reports whether any top-level property of s uses oneOf.
+func hasOneOf(s *Schema) bool {
+	for _, p := range s.Properties {
+		if len(p.OneOf) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
 // Generate returns a map of filename → gofmt-formatted Go source, one entry per schema.
 func (g *Generator) Generate() (map[string][]byte, error) {
 	schemasMap := make(map[string][]byte, len(g.schemas))
 
 	for _, mainSchema := range g.schemas {
 		var buf bytes.Buffer
-		var decls bytes.Buffer
+		var references bytes.Buffer
 
-		body := generateFields(&decls, mainSchema.Title, mainSchema)
+		body := generateFields(&references, mainSchema, mainSchema.Title, mainSchema)
 		if body == "" {
 			continue
 		}
 
-		fmt.Fprintf(&buf, "package model\n\ntype %s struct {\n%s}\n", mainSchema.Title, body)
-		if decls.Len() > 0 {
-			fmt.Fprintf(&buf, "\n%s", decls.String())
+		defNames := make([]string, 0, len(mainSchema.Defs))
+		for name := range mainSchema.Defs {
+			defNames = append(defNames, name)
+		}
+		sort.Strings(defNames)
+		for _, name := range defNames {
+			setObjectType(&references, mainSchema, mainSchema.Title+toPascalCase(name), mainSchema.Defs[name])
+		}
+
+		header := "package model\n\n"
+		if hasOneOf(mainSchema) {
+			header += "import (\n\t\"encoding/json\"\n\t\"fmt\"\n)\n\n"
+		}
+		fmt.Fprintf(&buf, "%stype %s struct {\n%s}\n", header, mainSchema.Title, body)
+		if references.Len() > 0 {
+			fmt.Fprintf(&buf, "\n%s", references.String())
 		}
 
 		src, err := format.Source(buf.Bytes())
@@ -134,7 +157,7 @@ func objectType(s *Schema) (isObject, nullable bool) {
 // generateFields builds the struct body for a struct named typeName from s.Properties,
 // emitting any nested enum/object type declarations into decls. Properties are sorted
 // for deterministic output.
-func generateFields(decls *bytes.Buffer, typeName string, s *Schema) string {
+func generateFields(refBuffer *bytes.Buffer, root *Schema, typeName string, s *Schema) string {
 	requiredFields := make(map[string]bool, len(s.Required))
 	for _, r := range s.Required {
 		requiredFields[r] = true
@@ -153,17 +176,22 @@ func generateFields(decls *bytes.Buffer, typeName string, s *Schema) string {
 		var goType string
 		switch {
 		case len(property.Enum) > 0:
-			goType = setEnumType(decls, typeName, name, property.Enum)
+			goType = setEnumType(refBuffer, typeName, name, property.Enum)
+		case len(property.OneOf) > 0:
+			goType = setUnionType(refBuffer, root, typeName+toPascalCase(name), property.OneOf)
+			if goType != "" {
+				goType = "*" + goType
+			}
 		case property.Ref != "":
-			goType = resolveRef(property.Ref)
+			goType, _ = resolveReferences(root.Title, property.Ref)
 		default:
 			if isObj, nullable := objectType(property); isObj {
-				goType = setObjectType(decls, typeName+toPascalCase(name), property)
+				goType = setObjectType(refBuffer, root, typeName+toPascalCase(name), property)
 				if nullable && goType != "" {
 					goType = "*" + goType
 				}
 			} else {
-				goType = setGoType(property)
+				goType = setGoType(root.Title, property)
 			}
 		}
 		if goType == "" {
@@ -183,8 +211,8 @@ func generateFields(decls *bytes.Buffer, typeName string, s *Schema) string {
 // returns the type name. Nested enums/objects are emitted (recursively) before the
 // struct itself. An object with no resolvable fields emits nothing and returns "" so the
 // caller skips the field.
-func setObjectType(decls *bytes.Buffer, typeName string, s *Schema) string {
-	body := generateFields(decls, typeName, s)
+func setObjectType(decls *bytes.Buffer, root *Schema, typeName string, s *Schema) string {
+	body := generateFields(decls, root, typeName, s)
 	if body == "" {
 		return ""
 	}
@@ -192,27 +220,102 @@ func setObjectType(decls *bytes.Buffer, typeName string, s *Schema) string {
 	return typeName
 }
 
+// discriminator returns the JSON key and string value of the first (sorted) property
+// carrying a non-empty string const — the field that selects a oneOf variant.
+func discriminator(s *Schema) (key, value string) {
+	names := make([]string, 0, len(s.Properties))
+	for n := range s.Properties {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	for _, n := range names {
+		p := s.Properties[n]
+		if len(p.Const) == 0 {
+			continue
+		}
+		var v string
+		if err := json.Unmarshal(p.Const, &v); err == nil {
+			return n, v
+		}
+	}
+	return "", ""
+}
+
+// setUnionType emits a struct with one pointer field per variant and an UnmarshalJSON
+// for a oneOf union into decls. Returns the struct type name, or "" if no variant resolves.
+func setUnionType(decls *bytes.Buffer, root *Schema, typeName string, members []*Schema) string {
+	type variant struct{ goType, fieldName, disc string }
+	var variants []variant
+	discKey := ""
+	for _, m := range members {
+		if m.Ref == "" {
+			continue
+		}
+		goType, defKey := resolveReferences(root.Title, m.Ref)
+		def := root.Defs[defKey]
+		if def == nil {
+			continue
+		}
+		k, v := discriminator(def)
+		if k == "" {
+			continue
+		}
+		discKey = k
+		variants = append(variants, variant{
+			goType:    goType,
+			fieldName: toPascalCase(defKey),
+			disc:      v,
+		})
+	}
+	if len(variants) == 0 {
+		return ""
+	}
+
+	fmt.Fprintf(decls, "type %s struct {\n", typeName)
+	for _, v := range variants {
+		fmt.Fprintf(decls, "\t%s *%s\n", v.fieldName, v.goType)
+	}
+	fmt.Fprintf(decls, "}\n\n")
+
+	field := toPascalCase(discKey)
+	fmt.Fprintf(decls, "func (c *%s) UnmarshalJSON(data []byte) error {\n", typeName)
+	fmt.Fprintf(decls, "\tif string(data) == \"null\" {\n\t\treturn nil\n\t}\n")
+	fmt.Fprintf(decls, "\tvar disc struct {\n\t\t%s string `json:%q`\n\t}\n", field, discKey)
+	fmt.Fprintf(decls, "\tif err := json.Unmarshal(data, &disc); err != nil {\n\t\treturn err\n\t}\n")
+	fmt.Fprintf(decls, "\tswitch disc.%s {\n", field)
+	for _, v := range variants {
+		fmt.Fprintf(decls, "\tcase %q:\n\t\tc.%s = &%s{}\n\t\treturn json.Unmarshal(data, c.%s)\n",
+			v.disc, v.fieldName, v.goType, v.fieldName)
+	}
+	fmt.Fprintf(decls, "\tdefault:\n\t\treturn fmt.Errorf(\"unknown %s %%q\", disc.%s)\n\t}\n}\n\n", discKey, field)
+	return typeName
+}
+
 // setGoType returns the Go type string for a schema node, or "" if the type cannot
 // be mapped to a primitive (array, object, multi-type beyond nullable, etc.).
 // Handles both single-string types ("string") and nullable pairs (["string","null"]).
-func setGoType(s *Schema) string {
+func setGoType(root string, s *Schema) string {
+	if s.Ref != "" {
+		gt, _ := resolveReferences(root, s.Ref)
+		return gt
+	}
 	if s.Type == nil {
 		return ""
 	}
 	var single string
 	if err := json.Unmarshal(s.Type, &single); err == nil && single == ARRAY_TYPE {
-		return setArrayType(s)
+		return setArrayType(root, s)
 	}
 	return setPrimitiveType(s)
 }
 
 // setArrayType returns "[]T" for array schemas whose items resolve to a known type.
 // Returns "" for unresolvable items (object, $ref, missing, etc.).
-func setArrayType(s *Schema) string {
+func setArrayType(root string, s *Schema) string {
 	if s.Items == nil {
 		return ""
 	}
-	elem := setGoType(s.Items)
+	elem := setGoType(root, s.Items)
 	if elem == "" {
 		return ""
 	}
@@ -245,15 +348,20 @@ func setEnumType(decls *bytes.Buffer, schemaName, property string, values []json
 	return typeName
 }
 
-// resolveRef maps a cross-schema $ref like "Category.json" to its Go type name by stripping
-// the path and ".json" suffix. Local refs ("#/...") are out of scope (steps 08+) and return "".
-// There is no existence check: if the referenced schema is never generated, the emitted
-// reference won't compile and must be fixed manually.
-func resolveRef(ref string) string {
-	if ref == "" || strings.HasPrefix(ref, "#") {
-		return ""
+// resolveReferences maps a $ref to its Go type name and the bare ref name. A local ref
+// ("#/$defs/RichTextNode") PascalCases the segment after the last "/" and prefixes the root schema
+// title → ("ArticleRichTextNode", "RichTextNode"). A cross-schema ref ("Category.json") strips the
+// path and ".json" suffix → ("Category", "Category"). The bare name is the raw def key, so callers
+// can index root.Defs with it; PascalCasing is left to callers. Empty → ("", "").
+func resolveReferences(root, ref string) (goType, name string) {
+	if ref == "" {
+		return "", ""
 	}
-	return strings.TrimSuffix(filepath.Base(ref), ".json")
+	name = strings.TrimSuffix(filepath.Base(ref), ".json")
+	if strings.HasPrefix(ref, "#") {
+		return root + toPascalCase(name), name
+	}
+	return name, name
 }
 
 // setPrimitiveType returns the Go type string for a schema node, or "" if the type cannot
