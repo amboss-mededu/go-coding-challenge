@@ -9,3 +9,6 @@ test:
 
 generate:
 	./bin/generator
+
+make deps:
+	go mod tidy
