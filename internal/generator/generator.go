@@ -96,9 +96,19 @@ func (g *Generator) Generate() (map[string][]byte, error) {
 			setObjectType(&refBuf, mainSchema, mainSchema.Title+toPascalCase(name), mainSchema.Defs[name])
 		}
 
+		// Add imports only for packages the generated code actually references. Struct
+		// tags use json:"..." (colon), not "json.", so they don't trigger a false match.
 		fileHeader := "package model\n\n"
-		if hasOneOf(mainSchema) {
-			fileHeader += "import (\n\t\"encoding/json\"\n\t\"fmt\"\n)\n\n"
+		generated := body + refBuf.String()
+		var imports []string
+		if strings.Contains(generated, "json.") {
+			imports = append(imports, "\t\"encoding/json\"")
+		}
+		if strings.Contains(generated, "fmt.") {
+			imports = append(imports, "\t\"fmt\"")
+		}
+		if len(imports) > 0 {
+			fileHeader += "import (\n" + strings.Join(imports, "\n") + "\n)\n\n"
 		}
 
 		fmt.Fprintf(&buf, "%stype %s struct {\n%s}\n", fileHeader, mainSchema.Title, body)
@@ -283,6 +293,7 @@ func setEnumType(decls *bytes.Buffer, schemaName, property string, values []json
 	typeName := schemaName + toPascalCase(property)
 	var consts bytes.Buffer
 	seen := make(map[string]bool)
+	var constNames []string
 	for _, raw := range values {
 		var v string
 		if err := json.Unmarshal(raw, &v); err != nil {
@@ -294,11 +305,31 @@ func setEnumType(decls *bytes.Buffer, schemaName, property string, values []json
 			name = fmt.Sprintf("%s%d", base, i)
 		}
 		seen[name] = true
+		constNames = append(constNames, name)
 		fmt.Fprintf(&consts, "\t%s %s = %q\n", name, typeName, v)
 	}
 
 	fmt.Fprintf(decls, "type %s string\n\nconst (\n%s)\n", typeName, consts.String())
+
+	if len(constNames) > 0 {
+		setEnumUnmarshal(decls, typeName, constNames)
+	}
 	return typeName
+}
+
+// setEnumUnmarshal emits an UnmarshalJSON method that rejects any value outside the enum's
+// constant set, turning silent acceptance of invalid values into an error. It is fully
+// generic: it references the generated constants, so it works for any string enum from any
+// schema. A JSON null is treated as absent (leaves the zero value), mirroring setUnionType.
+func setEnumUnmarshal(decls *bytes.Buffer, typeName string, constNames []string) {
+	fmt.Fprintf(decls, "\nfunc (e *%s) UnmarshalJSON(data []byte) error {\n", typeName)
+	fmt.Fprintf(decls, "\tif string(data) == \"null\" {\n\t\treturn nil\n\t}\n")
+	fmt.Fprintf(decls, "\tvar s string\n")
+	fmt.Fprintf(decls, "\tif err := json.Unmarshal(data, &s); err != nil {\n\t\treturn err\n\t}\n")
+	fmt.Fprintf(decls, "\tswitch %s(s) {\n", typeName)
+	fmt.Fprintf(decls, "\tcase %s:\n", strings.Join(constNames, ", "))
+	fmt.Fprintf(decls, "\t\t*e = %s(s)\n\t\treturn nil\n", typeName)
+	fmt.Fprintf(decls, "\tdefault:\n\t\treturn fmt.Errorf(\"invalid %s %%q\", s)\n\t}\n}\n", typeName)
 }
 
 // resolveReferences maps a $ref to its Go type name. A local ref ("#/$defs/RichTextNode")

@@ -75,13 +75,3 @@ func objectType(s *Schema) (isObject, nullable bool) {
 	}
 	return false, false
 }
-
-// hasOneOf reports whether any top-level property of s uses oneOf.
-func hasOneOf(s *Schema) bool {
-	for _, p := range s.Properties {
-		if len(p.OneOf) > 0 {
-			return true
-		}
-	}
-	return false
-}

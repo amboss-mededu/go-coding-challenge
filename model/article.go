@@ -25,13 +25,13 @@ func (c *ArticleContent) UnmarshalJSON(data []byte) error {
 	if string(data) == "null" {
 		return nil
 	}
-	var discriminator struct {
+	var disc struct {
 		Format string `json:"format"`
 	}
-	if err := json.Unmarshal(data, &discriminator); err != nil {
+	if err := json.Unmarshal(data, &disc); err != nil {
 		return err
 	}
-	switch discriminator.Format {
+	switch disc.Format {
 	case "richtext":
 		c.RichText = &ArticleRichText{}
 		return json.Unmarshal(data, c.RichText)
@@ -39,7 +39,7 @@ func (c *ArticleContent) UnmarshalJSON(data []byte) error {
 		c.PlainText = &ArticlePlainText{}
 		return json.Unmarshal(data, c.PlainText)
 	default:
-		return fmt.Errorf("unknown format %q", discriminator.Format)
+		return fmt.Errorf("unknown format %q", disc.Format)
 	}
 }
 
@@ -60,6 +60,23 @@ const (
 	ArticleStatusPublished ArticleStatus = "published"
 	ArticleStatusArchived  ArticleStatus = "archived"
 )
+
+func (e *ArticleStatus) UnmarshalJSON(data []byte) error {
+	if string(data) == "null" {
+		return nil
+	}
+	var s string
+	if err := json.Unmarshal(data, &s); err != nil {
+		return err
+	}
+	switch ArticleStatus(s) {
+	case ArticleStatusDraft, ArticleStatusPublished, ArticleStatusArchived:
+		*e = ArticleStatus(s)
+		return nil
+	default:
+		return fmt.Errorf("invalid ArticleStatus %q", s)
+	}
+}
 
 type ArticlePlainText struct {
 	Format string `json:"format,omitempty"`
